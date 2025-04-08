@@ -1,23 +1,20 @@
 // WeatherScreen.js
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity } from 'react-native';
-import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
-
+import { getCurrentLocation } from '../utils/GetCurrentLocation';
 
 const WeatherScreen = ({ navigation }) => {
   const [weatherData, setWeatherData] = useState(null);
 
   useEffect(() => {
     (async () => {
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        console.error('Permission to access location was denied');
-        return;
+      try {
+        const coords = await getCurrentLocation();
+        fetchWeather(coords.latitude, coords.longitude);
+      } catch (error) {
+        console.error('Location fetch failed:', error);
       }
-
-      let location = await Location.getCurrentPositionAsync({});
-      fetchWeather(location.coords.latitude, location.coords.longitude);
     })();
   }, []);
 

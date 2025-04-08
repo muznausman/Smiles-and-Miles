@@ -26,6 +26,11 @@
         "backgroundColor": "#FFFFFF"
       }
     },
+    "expo": {
+      "extra": {
+        "mapboxAccessToken": "pk.eyJ1IjoibXV6emllMjIiLCJhIjoiY204bjRvcHA2MG5jaDJqcGw5eWJzOTcxbyJ9.d7PVM68c3Fv734NMJaMuRg"
+      }
+    },
     "web": {
       "favicon": "./assets/favicon.png"
     }

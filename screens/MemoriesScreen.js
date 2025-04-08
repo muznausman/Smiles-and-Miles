@@ -2,42 +2,59 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image, Alert } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
+import { auth } from '../firebase/firebaseConfig';
+import { loadUserData, saveUserData, getUserDisplayName } from '../utils/storage';
+
+// Base key for memories
+const MEMORIES_KEY = '@memories';
 
 export default function MemoriesScreen() {
   const navigation = useNavigation();
   const [memories, setMemories] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [userName, setUserName] = useState('');
 
-  // Load memories from AsyncStorage
+  // Load memories from user-specific storage
   const loadMemories = async () => {
     try {
-      const savedMemories = await AsyncStorage.getItem('memories');
-      if (savedMemories !== null) {
-        setMemories(JSON.parse(savedMemories));
+      // Check for logged-in user
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        Alert.alert('Error', 'You must be logged in to view memories');
+        return;
+      }
+
+      setUserName(getUserDisplayName());
+      
+      // Load user-specific memories
+      const savedMemories = await loadUserData(MEMORIES_KEY);
+      if (savedMemories) {
+        setMemories(savedMemories);
       } else {
-        // Example memories data (only used first time)
-        const initialMemories = [
-          { id: 1, location: 'London 2025', description: "New Year's trip with friends", image: require('/Users/muznausman/smiles-and-miles/assets/trip.png') },
-          { id: 2, location: 'Paris 2024', description: 'Honeymoon', image: require('/Users/muznausman/smiles-and-miles/assets/trip.png') },
-          { id: 3, location: 'California 2024', description: 'Solo Trip', image: require('/Users/muznausman/smiles-and-miles/assets/trip.png') },
-          { id: 4, location: 'New York 2023', description: 'First trip with Patrick', image: require('/Users/muznausman/smiles-and-miles/assets/trip.png') },
-        ];
-        await AsyncStorage.setItem('memories', JSON.stringify(initialMemories));
-        setMemories(initialMemories);
+        setMemories([]); // Set an empty array if no saved memories
       }
     } catch (error) {
       console.error('Failed to load memories:', error);
+      Alert.alert('Error', 'Failed to load memories: ' + error.message);
     }
   };
 
   // Reload memories each time the screen is focused
   useFocusEffect(
     React.useCallback(() => {
-      loadMemories();
-      return () => {};
+      const unsubscribe = auth.onAuthStateChanged((user) => {
+        if (user) {
+          setUserName(getUserDisplayName());
+          loadMemories();
+        } else {
+          // If user logs out, navigate back
+          navigation.navigate('Home'); // Replace with your main screen
+        }
+      });
+      
+      return () => unsubscribe();
     }, [])
   );
 
@@ -60,12 +77,13 @@ export default function MemoriesScreen() {
               const updatedMemories = memories.filter(memory => memory.id !== memoryId);
               setMemories(updatedMemories);
               
-              // Save to AsyncStorage
-              await AsyncStorage.setItem('memories', JSON.stringify(updatedMemories));
+              // Save to user-specific storage
+              await saveUserData(MEMORIES_KEY, updatedMemories);
               
               // Also delete associated images and documents
-              await AsyncStorage.removeItem(`memory_${memoryId}_images`);
-              await AsyncStorage.removeItem(`memory_${memoryId}_documents`);
+              await saveUserData(`memory_${memoryId}_images`, null);
+              await saveUserData(`memory_${memoryId}_documents`, null);
+              await saveUserData(`memory_${memoryId}_journal`, null);
               
               // Show success message
               Alert.alert('Success', 'Memory deleted successfully');
@@ -124,6 +142,13 @@ export default function MemoriesScreen() {
     setIsLoading(true);
     
     try {
+      // Check user logged in
+      if (!auth.currentUser) {
+        Alert.alert('Error', 'You must be logged in to create memories');
+        setIsLoading(false);
+        return;
+      }
+      
       // Step 1: Get location
       const location = await new Promise((resolve) => {
         Alert.prompt(
@@ -191,19 +216,21 @@ export default function MemoriesScreen() {
   // Final creation of memory with all data
   const createMemory = async (location, description, imageUri) => {
     try {
-      // Create memory object
+      // Create memory object with user ID
       const newMemory = {
         id: Date.now(),
         location,
         description,
         image: imageUri || require('/Users/muznausman/smiles-and-miles/assets/logo.png'),
         imageIsUri: !!imageUri, // Flag to indicate if image is a URI or a require
+        userId: auth.currentUser.uid,
+        createdAt: new Date().toISOString()
       };
       
       const updatedMemories = [...memories, newMemory];
       
-      // Save to AsyncStorage
-      await AsyncStorage.setItem('memories', JSON.stringify(updatedMemories));
+      // Save to user-specific storage
+      await saveUserData(MEMORIES_KEY, updatedMemories);
       
       // Update state
       setMemories(updatedMemories);
@@ -233,6 +260,12 @@ export default function MemoriesScreen() {
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.headerText}>Memories</Text>
+        </View>
+        
+        {/* User Info */}
+        <View style={styles.userInfoContainer}>
+          <Ionicons name="person-circle-outline" size={18} color="#6C84F5" />
+          <Text style={styles.userInfoText}>{userName}</Text>
         </View>
 
         {/* Previous Trips */}
@@ -294,6 +327,23 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: 'bold',
     color: '#FFF',
+  },
+  userInfoContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: '#E6EBFF',
+    borderRadius: 15,
+    alignSelf: 'flex-start',
+    marginTop: 10,
+    marginBottom: 5,
+  },
+  userInfoText: {
+    fontSize: 12,
+    color: '#4A5F94',
+    marginLeft: 5,
+    fontWeight: '500',
   },
   sectionTitle: {
     fontSize: 18,

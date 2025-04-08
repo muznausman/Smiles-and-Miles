@@ -34,7 +34,7 @@ const HomeScreen = ({ navigation }) => {
       </View>
 
       <View style={styles.container}>
-        <Text style={styles.sectionTitle}>Categories</Text>
+        <Text style={styles.sectionTitle}>Quick Access</Text>
         <View style={styles.categoriesContainer}>
           <TouchableOpacity style={styles.categoryButton}>
             <Ionicons name="document-text-outline" size={28} color="#4A90E2" />

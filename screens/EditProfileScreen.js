@@ -13,7 +13,9 @@ import {
   SafeAreaView
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { auth, db } from '../firebase/firebaseConfig';
+import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { updateProfile } from 'firebase/auth';
 
 const EditProfileScreen = ({ navigation }) => {
   const [name, setName] = useState('');
@@ -21,6 +23,7 @@ const EditProfileScreen = ({ navigation }) => {
   const [phone, setPhone] = useState('');
   const [location, setLocation] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [originalUserData, setOriginalUserData] = useState(null);
 
   // Load user data on mount
   useEffect(() => {
@@ -29,13 +32,26 @@ const EditProfileScreen = ({ navigation }) => {
 
   const loadUserData = async () => {
     try {
-      const userDataJson = await AsyncStorage.getItem('userData');
-      if (userDataJson) {
-        const userData = JSON.parse(userDataJson);
-        setName(userData.name || '');
-        setEmail(userData.email || '');
-        setPhone(userData.phone || '');
-        setLocation(userData.location || '');
+      const user = auth.currentUser;
+      if (user) {
+        const docRef = doc(db, 'users', user.uid);
+        const docSnap = await getDoc(docRef);
+        
+        if (docSnap.exists()) {
+          const userData = docSnap.data();
+          setName(userData.name || '');
+          setEmail(user.email || '');
+          setPhone(userData.phone || '');
+          setLocation(userData.location || '');
+          
+          // Store original data to compare changes
+          setOriginalUserData({
+            name: userData.name,
+            email: user.email,
+            phone: userData.phone,
+            location: userData.location
+          });
+        }
       }
     } catch (error) {
       console.error('Error loading user data:', error);
@@ -44,6 +60,7 @@ const EditProfileScreen = ({ navigation }) => {
   };
 
   const saveProfile = async () => {
+    // Validation
     if (!name.trim()) {
       Alert.alert('Error', 'Name cannot be empty');
       return;
@@ -64,17 +81,28 @@ const EditProfileScreen = ({ navigation }) => {
     setIsLoading(true);
 
     try {
-      // Prepare user data
-      const userData = {
+      const user = auth.currentUser;
+      if (!user) {
+        throw new Error('No authenticated user');
+      }
+
+      // Prepare user data updates
+      const updates = {
         name,
-        email,
         phone,
-        location,
-        updatedAt: new Date().toISOString()
+        location
       };
 
-      // Save to AsyncStorage
-      await AsyncStorage.setItem('userData', JSON.stringify(userData));
+      // Update Firestore document
+      const userDocRef = doc(db, 'users', user.uid);
+      await updateDoc(userDocRef, updates);
+
+      // Update Firebase Auth profile if name changed
+      if (name !== originalUserData.name) {
+        await updateProfile(user, {
+          displayName: name
+        });
+      }
 
       // Show success message and go back
       Alert.alert('Success', 'Profile updated successfully', [
@@ -124,12 +152,10 @@ const EditProfileScreen = ({ navigation }) => {
             <View style={styles.inputGroup}>
               <Text style={styles.label}>Email</Text>
               <TextInput
-                style={styles.input}
+                style={[styles.input, styles.disabledInput]}
                 value={email}
-                onChangeText={setEmail}
-                placeholder="Enter your email"
-                keyboardType="email-address"
-                autoCapitalize="none"
+                editable={false}
+                placeholder="Email cannot be changed"
               />
             </View>
 
@@ -224,6 +250,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#ddd',
     fontSize: 16,
+  },
+  disabledInput: {
+    backgroundColor: '#f0f0f0',
   },
   saveButton: {
     backgroundColor: '#6C84F5',

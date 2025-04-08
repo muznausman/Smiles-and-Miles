@@ -1,5 +1,5 @@
-// HomeScreen.js with long press to delete activity (minimal change)
-import React, { useContext, useState, useEffect } from 'react';
+// HomeScreen.js
+import React, { useContext, useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,13 +11,15 @@ import {
   SafeAreaView,
   Alert,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { TripContext } from '../TripContext';
 import { auth, db } from '../firebase/firebaseConfig';
 import { doc, getDoc } from 'firebase/firestore';
+import { saveUserData, loadUserData } from '../utils/storage';
 
 const HomeScreen = ({ navigation }) => {
-  const { activities, setActivities } = useContext(TripContext);
+  const { activities, setActivities, userId } = useContext(TripContext);
   const [searchQuery, setSearchQuery] = useState('');
   const [userData, setUserData] = useState(null);
 
@@ -25,26 +27,41 @@ const HomeScreen = ({ navigation }) => {
     activity.title.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  useEffect(() => {
-    const fetchUserData = async () => {
-      try {
-        const user = auth.currentUser;
-        if (user) {
-          const docRef = doc(db, 'users', user.uid);
-          const docSnap = await getDoc(docRef);
-          if (docSnap.exists()) {
-            setUserData(docSnap.data());
-          }
+  const fetchUserData = useCallback(async () => {
+    try {
+      const user = auth.currentUser;
+      if (user) {
+        const docRef = doc(db, 'users', user.uid);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const fetchedUserData = docSnap.data();
+          setUserData({
+            name: fetchedUserData.name || 'Guest',
+            photoURL: fetchedUserData.photoURL || null,
+            email: user.email,
+          });
+        } else {
+          // Fallback if no Firestore document
+          setUserData({
+            name: user.displayName || 'Guest',
+            photoURL: null,
+            email: user.email,
+          });
         }
-      } catch (error) {
-        console.error('Error fetching user data:', error);
       }
-    };
-
-    fetchUserData();
+    } catch (error) {
+      console.error('Error fetching user data:', error);
+    }
   }, []);
 
-  const handleDeleteActivity = (id) => {
+  // Use useFocusEffect to refetch data every time screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      fetchUserData();
+    }, [fetchUserData])
+  );
+
+  const handleDeleteActivity = async (id) => {
     Alert.alert(
       'Delete Activity',
       'Are you sure you want to delete this activity?',
@@ -54,7 +71,9 @@ const HomeScreen = ({ navigation }) => {
           text: 'Delete',
           style: 'destructive',
           onPress: () => {
-            setActivities((prev) => prev.filter((act) => act.id !== id));
+            // Just update through context - TripContext will handle the storage
+            const updatedActivities = activities.filter((act) => act.id !== id);
+            setActivities(updatedActivities);
           },
         },
       ]
@@ -78,14 +97,16 @@ const HomeScreen = ({ navigation }) => {
       <View style={styles.topSection}>
         <View style={styles.profileContainer}>
           <TouchableOpacity onPress={() => navigation.navigate('Account')}>
-            <Image
-              source={
-                userData?.photoURL
-                  ? { uri: userData.photoURL }
-                  : require('../assets/profilepic.png')
-              }
-              style={styles.profileImage}
-            />
+            {userData?.photoURL ? (
+              <Image
+                source={{ uri: userData.photoURL }}
+                style={styles.profileImage}
+              />
+            ) : (
+              <View style={styles.profileImagePlaceholder}>
+                <Ionicons name="person-outline" size={30} color="#fff" />
+              </View>
+            )}
           </TouchableOpacity>
           <View>
             <Text style={styles.welcomeText}>Welcome</Text>
@@ -104,7 +125,7 @@ const HomeScreen = ({ navigation }) => {
       </View>
 
       <View style={styles.container}>
-        <Text style={styles.sectionTitle}>Categories</Text>
+        <Text style={styles.sectionTitle}>Quick Access</Text>
         <View style={styles.categoriesContainer}>
           <TouchableOpacity style={styles.categoryButton} onPress={() => navigation.navigate('LanguageEssentials')}>
             <Ionicons name="chatbubble-ellipses-outline" size={28} color="#4A90E2" />
@@ -138,7 +159,6 @@ const HomeScreen = ({ navigation }) => {
                   <View style={styles.activityInfo}>
                     <Text style={styles.activityTitle}>{item.title}</Text>
                     <Text style={styles.activityLocation}>{item.time}</Text>
-                    
                   </View>
                 </View>
               </TouchableOpacity>
@@ -176,6 +196,15 @@ const styles = StyleSheet.create({
     width: 50,
     height: 50,
     borderRadius: 25,
+    marginRight: 10,
+  },
+  profileImagePlaceholder: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: '#e0e0e0',
+    justifyContent: 'center',
+    alignItems: 'center',
     marginRight: 10,
   },
   welcomeText: {
@@ -253,10 +282,6 @@ const styles = StyleSheet.create({
   activityLocation: {
     color: '#888',
     fontSize: 12,
-  },
-  activityRating: {
-    fontSize: 12,
-    fontWeight: 'bold',
   },
 });
 

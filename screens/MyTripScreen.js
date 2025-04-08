@@ -1,3 +1,4 @@
+//working 
 import React, { useContext, useState, useEffect } from 'react';
 import { 
   View, 
@@ -9,15 +10,36 @@ import {
   Alert,
   SafeAreaView,
   Modal,
-  Linking
+  Linking,
+  Platform,
+  Dimensions
 } from 'react-native';
 import { TripContext } from '../TripContext';
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from 'expo-file-system';
+import * as ImagePicker from 'expo-image-picker';
+import { 
+  saveUserData, 
+  loadUserData, 
+  isUserLoggedIn,
+  getUserDisplayName 
+} from '../utils/storage';
+import { auth, db } from '../firebase/firebaseConfig';
+import { fetchPOIsFromMapbox } from '../utils/mapboxService';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { getCurrentLocation } from '../utils/GetCurrentLocation';
+
+const { height } = Dimensions.get('window');
+
+// Base keys for user-specific storage
+const TRAVEL_DOCS_KEY = '@travelDocuments';
+const HOTEL_DOCS_KEY = '@hotelBookings';
+const TOUR_DOCS_KEY = '@tourTickets';
+const ACTIVITIES_KEY = '@tripActivities';
 
 const MyTripScreen = ({ navigation }) => {
-  const { addActivity } = useContext(TripContext);
+  const { addActivity, activities, userId } = useContext(TripContext);
   const [activity, setActivity] = useState('');
   const [time, setTime] = useState('');
   const [activeTab, setActiveTab] = useState('activity');
@@ -27,6 +49,9 @@ const MyTripScreen = ({ navigation }) => {
   const [hotelBookings, setHotelBookings] = useState([]);
   const [tourTickets, setTourTickets] = useState([]);
   
+  // User info
+  const [userName, setUserName] = useState('');
+  
   // Modal states
   const [showAddDocumentModal, setShowAddDocumentModal] = useState(false);
   const [documentTitle, setDocumentTitle] = useState('');
@@ -34,124 +59,164 @@ const MyTripScreen = ({ navigation }) => {
   const [documentUri, setDocumentUri] = useState('');
   const [documentLink, setDocumentLink] = useState('');
   const [isAddingLink, setIsAddingLink] = useState(false);
+  
+  // Activity suggestions states
+  const [suggestions, setSuggestions] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  
+  // Food suggestions states
+  const [foodSuggestions, setFoodSuggestions] = useState([]);
+  const [loadingFood, setLoadingFood] = useState(false);
+  const [foodError, setFoodError] = useState(null);
+  
+  // Time entry modal
+  const [showTimeModal, setShowTimeModal] = useState(false);
+  const [tempTime, setTempTime] = useState('');
+  const [tempActivity, setTempActivity] = useState(null);
+  
+  // Time picker states
+  const [date, setDate] = useState(new Date());
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [showModalTimePicker, setShowModalTimePicker] = useState(false);
 
-  // Load saved documents on mount
+  // Load documents on mount
   useEffect(() => {
-    loadDocuments();
+    const loadInitialData = async () => {
+      // Check if user is logged in
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        Alert.alert('Error', 'You must be logged in');
+        return;
+      }
+
+      // Set user name
+      setUserName(getUserDisplayName());
+
+      try {
+        // Load travel documents
+        const savedTravelDocs = await loadUserData(TRAVEL_DOCS_KEY);
+        if (savedTravelDocs) setTravelDocuments(savedTravelDocs);
+        
+        // Load hotel bookings
+        const savedHotelBookings = await loadUserData(HOTEL_DOCS_KEY);
+        if (savedHotelBookings) setHotelBookings(savedHotelBookings);
+        
+        // Load tour tickets
+        const savedTourTickets = await loadUserData(TOUR_DOCS_KEY);
+        if (savedTourTickets) setTourTickets(savedTourTickets);
+      } catch (error) {
+        console.error('Error loading documents:', error);
+      }
+    };
+
+    loadInitialData();
   }, []);
 
-  // Load documents from AsyncStorage
-  const loadDocuments = async () => {
-    try {
-      const savedTravelDocs = await AsyncStorage.getItem('travelDocuments');
-      if (savedTravelDocs) setTravelDocuments(JSON.parse(savedTravelDocs));
-      
-      const savedHotelBookings = await AsyncStorage.getItem('hotelBookings');
-      if (savedHotelBookings) setHotelBookings(JSON.parse(savedHotelBookings));
-      
-      const savedTourTickets = await AsyncStorage.getItem('tourTickets');
-      if (savedTourTickets) setTourTickets(JSON.parse(savedTourTickets));
-    } catch (error) {
-      console.error('Error loading documents:', error);
-    }
-  };
-
-  // Save documents to AsyncStorage
+  // Save documents with user-specific storage
   const saveDocuments = async (type, documents) => {
     try {
-      await AsyncStorage.setItem(type, JSON.stringify(documents));
+      let key;
+      switch(type) {
+        case 'travel':
+          key = TRAVEL_DOCS_KEY;
+          break;
+        case 'hotel':
+          key = HOTEL_DOCS_KEY;
+          break;
+        case 'tour':
+          key = TOUR_DOCS_KEY;
+          break;
+        default:
+          throw new Error('Invalid document type');
+      }
+      
+      await saveUserData(key, documents);
     } catch (error) {
-      console.error(`Error saving ${type}:`, error);
+      console.error(`Error saving ${type} documents:`, error);
+      Alert.alert('Error', `Failed to save ${type} documents`);
     }
   };
 
-  // Handle adding activity
-  const handleAddActivity = () => {
-    if (activity && time) {
-      addActivity({ id: Date.now().toString(), title: activity, time });
-      setActivity('');
-      setTime('');
-      Alert.alert('Success', 'Activity added successfully!');
-    } else {
-      Alert.alert('Error', 'Please enter both activity title and time');
-    }
-  };
-
-  // Pick a document
-  const pickDocument = async () => {
+  // Copy document to app's directory for persistence
+  const copyDocumentToAppDirectory = async (uri) => {
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: '*/*',
-        copyToCacheDirectory: true
+      const fileName = `document_${Date.now()}.${uri.split('.').pop()}`;
+      const destinationUri = `${FileSystem.cacheDirectory}${fileName}`;
+      
+      await FileSystem.copyAsync({
+        from: uri,
+        to: destinationUri
       });
       
-      if (result.type === 'success' || (!result.canceled && result.assets && result.assets.length > 0)) {
-        const docInfo = result.type === 'success' ? result : result.assets[0];
-        setDocumentUri(docInfo.uri);
-        return true;
-      }
-      return false;
+      return destinationUri;
     } catch (error) {
-      console.error('Error picking document:', error);
-      Alert.alert('Error', 'Failed to pick document');
-      return false;
+      console.error('Error copying document:', error);
+      throw error;
     }
   };
 
   // Add new document
   const addNewDocument = async () => {
+    // Validate inputs
     if (!documentTitle) {
-      Alert.alert('Error', 'Please enter a title for your document');
+      Alert.alert('Error', 'Please enter a document title');
       return;
     }
 
-    // For file documents
-    if (!isAddingLink) {
-      if (!documentUri) {
-        const picked = await pickDocument();
-        if (!picked) return;
+    try {
+      // For file documents
+      let finalUri = null;
+      if (!isAddingLink) {
+        if (!documentUri) {
+          Alert.alert('Error', 'Please select a document');
+          return;
+        }
+        finalUri = await copyDocumentToAppDirectory(documentUri);
       }
-    } 
-    // For link documents
-    else if (!documentLink) {
-      Alert.alert('Error', 'Please enter a valid link');
-      return;
+
+      // Prepare document object
+      const newDoc = {
+        id: Date.now().toString(),
+        title: documentTitle,
+        date: new Date().toLocaleDateString(),
+        ...(isAddingLink 
+          ? { link: documentLink, isLink: true } 
+          : { uri: finalUri, isLink: false })
+      };
+
+      // Update documents based on type
+      let updatedDocs = [];
+      switch(documentType) {
+        case 'travel':
+          updatedDocs = [...travelDocuments, newDoc];
+          setTravelDocuments(updatedDocs);
+          await saveDocuments('travel', updatedDocs);
+          break;
+        case 'hotel':
+          updatedDocs = [...hotelBookings, newDoc];
+          setHotelBookings(updatedDocs);
+          await saveDocuments('hotel', updatedDocs);
+          break;
+        case 'tour':
+          updatedDocs = [...tourTickets, newDoc];
+          setTourTickets(updatedDocs);
+          await saveDocuments('tour', updatedDocs);
+          break;
+      }
+
+      // Reset form
+      setDocumentTitle('');
+      setDocumentUri('');
+      setDocumentLink('');
+      setShowAddDocumentModal(false);
+      setIsAddingLink(false);
+      
+      Alert.alert('Success', 'Document added successfully');
+    } catch (error) {
+      console.error('Error adding document:', error);
+      Alert.alert('Error', 'Failed to add document');
     }
-
-    const newDoc = {
-      id: Date.now().toString(),
-      title: documentTitle,
-      date: new Date().toLocaleDateString(),
-      ...(isAddingLink 
-        ? { link: documentLink, isLink: true } 
-        : { uri: documentUri, isLink: false })
-    };
-
-    let updatedDocs = [];
-    
-    // Add to appropriate list based on type
-    if (documentType === 'travel') {
-      updatedDocs = [...travelDocuments, newDoc];
-      setTravelDocuments(updatedDocs);
-      saveDocuments('travelDocuments', updatedDocs);
-    } else if (documentType === 'hotel') {
-      updatedDocs = [...hotelBookings, newDoc];
-      setHotelBookings(updatedDocs);
-      saveDocuments('hotelBookings', updatedDocs);
-    } else if (documentType === 'tour') {
-      updatedDocs = [...tourTickets, newDoc];
-      setTourTickets(updatedDocs);
-      saveDocuments('tourTickets', updatedDocs);
-    }
-
-    // Reset form
-    setDocumentTitle('');
-    setDocumentUri('');
-    setDocumentLink('');
-    setShowAddDocumentModal(false);
-    setIsAddingLink(false);
-    
-    Alert.alert('Success', 'Document added successfully!');
   };
 
   // Open document
@@ -166,8 +231,7 @@ const MyTripScreen = ({ navigation }) => {
         }
       });
     } else {
-      // Open document viewer with correct parameters
-      console.log('Opening document in viewer:', doc.uri);
+      // Open document viewer
       navigation.navigate('DocumentViewer', {
         documentUri: doc.uri,
         documentName: doc.title,
@@ -177,7 +241,7 @@ const MyTripScreen = ({ navigation }) => {
   };
 
   // Delete document
-  const deleteDocument = (type, id) => {
+  const deleteDocument = async (type, id) => {
     Alert.alert(
       'Delete Document',
       'Are you sure you want to delete this document?',
@@ -186,24 +250,33 @@ const MyTripScreen = ({ navigation }) => {
         { 
           text: 'Delete', 
           style: 'destructive',
-          onPress: () => {
-            let updatedDocs = [];
-            
-            if (type === 'travel') {
-              updatedDocs = travelDocuments.filter(doc => doc.id !== id);
-              setTravelDocuments(updatedDocs);
-              saveDocuments('travelDocuments', updatedDocs);
-            } else if (type === 'hotel') {
-              updatedDocs = hotelBookings.filter(doc => doc.id !== id);
-              setHotelBookings(updatedDocs);
-              saveDocuments('hotelBookings', updatedDocs);
-            } else if (type === 'tour') {
-              updatedDocs = tourTickets.filter(doc => doc.id !== id);
-              setTourTickets(updatedDocs);
-              saveDocuments('tourTickets', updatedDocs);
+          onPress: async () => {
+            try {
+              let updatedDocs = [];
+              
+              switch(type) {
+                case 'travel':
+                  updatedDocs = travelDocuments.filter(doc => doc.id !== id);
+                  setTravelDocuments(updatedDocs);
+                  await saveDocuments('travel', updatedDocs);
+                  break;
+                case 'hotel':
+                  updatedDocs = hotelBookings.filter(doc => doc.id !== id);
+                  setHotelBookings(updatedDocs);
+                  await saveDocuments('hotel', updatedDocs);
+                  break;
+                case 'tour':
+                  updatedDocs = tourTickets.filter(doc => doc.id !== id);
+                  setTourTickets(updatedDocs);
+                  await saveDocuments('tour', updatedDocs);
+                  break;
+              }
+              
+              Alert.alert('Success', 'Document deleted successfully');
+            } catch (error) {
+              console.error('Error deleting document:', error);
+              Alert.alert('Error', 'Failed to delete document');
             }
-            
-            Alert.alert('Success', 'Document deleted successfully!');
           }
         }
       ]
@@ -223,7 +296,7 @@ const MyTripScreen = ({ navigation }) => {
           <Ionicons 
             name={doc.isLink ? "link-outline" : "document-text-outline"} 
             size={24} 
-            color="##6C84F5" 
+            color="#6C84F5" 
           />
         </View>
         <View style={styles.documentInfo}>
@@ -235,7 +308,7 @@ const MyTripScreen = ({ navigation }) => {
     );
   };
 
-  // Render Add Document Modal
+  // Add Document Modal
   const renderAddDocumentModal = () => {
     return (
       <Modal
@@ -247,7 +320,13 @@ const MyTripScreen = ({ navigation }) => {
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Add New Document</Text>
-              <TouchableOpacity onPress={() => setShowAddDocumentModal(false)}>
+              <TouchableOpacity onPress={() => {
+                setShowAddDocumentModal(false);
+                setDocumentTitle('');
+                setDocumentUri('');
+                setDocumentLink('');
+                setIsAddingLink(false);
+              }}>
                 <Ionicons name="close" size={24} color="#000" />
               </TouchableOpacity>
             </View>
@@ -284,29 +363,66 @@ const MyTripScreen = ({ navigation }) => {
               </TouchableOpacity>
             </View>
             
-            {isAddingLink ? (
-              <TextInput
-                placeholder="Enter URL (e.g., https://booking.com/reservation)"
-                style={styles.modalInput}
-                value={documentLink}
-                onChangeText={setDocumentLink}
-                autoCapitalize="none"
-                keyboardType="url"
-              />
-            ) : (
-              <TouchableOpacity 
-                style={styles.filePicker}
-                onPress={pickDocument}
-              >
-                <Ionicons name="cloud-upload-outline" size={30} color="#6C84F5" />
-                <Text style={styles.filePickerText}>
-                  {documentUri ? 'File Selected' : 'Tap to Select File'}
-                </Text>
-              </TouchableOpacity>
-            )}
+            {!isAddingLink ? (
+  <TouchableOpacity 
+    style={styles.filePicker}
+    onPress={async () => {
+      try {
+        const result = await DocumentPicker.getDocumentAsync({
+          type: '*/*',
+          copyToCacheDirectory: true
+        });
+        
+        console.log('Document picker result:', result); // Add this line for debugging
+        
+        if (result.type === 'success' || (!result.canceled && result.assets && result.assets.length > 0)) {
+          // Handle both DocumentPicker and ImagePicker results
+          const uri = result.type === 'success' ? result.uri : result.assets[0].uri;
+          const name = result.type === 'success' ? result.name : result.assets[0].fileName;
+          
+          // Set the document URI
+          setDocumentUri(uri);
+          
+          // If no title is set, use the filename
+          if (!documentTitle) {
+            setDocumentTitle(name || 'Uploaded Document');
+          }
+        }
+      } catch (error) {
+        console.error('Document selection error:', error);
+        Alert.alert('Error', 'Failed to select document: ' + error.message);
+      }
+    }}
+  >
+    <Ionicons name="cloud-upload-outline" size={30} color="#6C84F5" />
+    <Text style={styles.filePickerText}>
+      {documentUri ? 'File Selected' : 'Tap to Select File'}
+    </Text>
+  </TouchableOpacity>
+)
+: (
+  <TextInput
+    placeholder="Enter URL (e.g., https://booking.com/reservation)"
+    style={styles.modalInput}
+    value={documentLink}
+    onChangeText={setDocumentLink}
+    autoCapitalize="none"
+    keyboardType="url"
+  />
+)}
             
             <TouchableOpacity 
-              style={styles.addButton}
+              style={[
+                styles.addButton,
+                // Disable button if no title or no document/link
+                (!documentTitle || (!isAddingLink && !documentUri) || 
+                 (isAddingLink && !documentLink)) && styles.disabledButton
+              ]}
+              disabled={
+                !documentTitle || 
+                (!isAddingLink && !documentUri) || 
+                (isAddingLink && !documentLink)
+              }
               onPress={addNewDocument}
             >
               <Text style={styles.addButtonText}>Add Document</Text>
@@ -314,6 +430,96 @@ const MyTripScreen = ({ navigation }) => {
           </View>
         </View>
       </Modal>
+    );
+  };
+
+  // Render Time Entry Modal
+  const renderTimeEntryModal = () => {
+    return (
+      <Modal
+        visible={showTimeModal}
+        animationType="slide"
+        transparent={true}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Select Time</Text>
+              <TouchableOpacity onPress={() => setShowTimeModal(false)}>
+                <Ionicons name="close" size={24} color="#000" />
+              </TouchableOpacity>
+            </View>
+            
+            <Text style={styles.modalSubtitle}>
+                When would you like to visit {tempActivity?.text}?
+              </Text>
+              
+              <TouchableOpacity 
+                style={styles.timePickerButton}
+                onPress={() => setShowModalTimePicker(true)}
+              >
+                <Text style={tempTime ? styles.timeText : styles.timePlaceholder}>
+                  {tempTime || "Tap to select time"}
+                </Text>
+                <Ionicons name="time-outline" size={24} color="#6C84F5" />
+              </TouchableOpacity>
+              
+              {showModalTimePicker && (
+                <DateTimePicker
+                  value={date}
+                  mode="time"
+                  is24Hour={false}
+                  display="default"
+                  onChange={(event, selectedDate) => {
+                    setShowModalTimePicker(false);
+                    if (selectedDate) {
+                      setDate(selectedDate);
+                      const hours = selectedDate.getHours();
+                      const minutes = selectedDate.getMinutes();
+                      const ampm = hours >= 12 ? 'PM' : 'AM';
+                      const formattedHours = hours % 12 || 12;
+                      const formattedMinutes = minutes < 10 ? `0${minutes}` : minutes;
+                      setTempTime(`${formattedHours}:${formattedMinutes} ${ampm}`);
+                    }
+                  }}
+                />
+              )}
+              
+              <TouchableOpacity 
+                style={[
+                  styles.addButton,
+                  !tempTime && styles.disabledButton
+                ]}
+                disabled={!tempTime}
+                onPress={() => {
+                  if (tempActivity && tempTime) {
+                    // Ensure the current user is logged in
+                    const currentUser = auth.currentUser;
+                    if (!currentUser) {
+                      Alert.alert('Error', 'You must be logged in to add activities');
+                      return;
+                    }
+                    
+                    // Add the activity with the current user's ID
+                    addActivity({ 
+                      id: Date.now().toString(), 
+                      title: tempActivity.text, 
+                      time: tempTime,
+                      userId: currentUser.uid // Add this line to associate with current user
+                    });
+                    
+                    setShowTimeModal(false);
+                    setTempActivity(null);
+                    setTempTime('');
+                    Alert.alert('Success', 'Activity added successfully');
+                  }
+                }}
+              >
+                <Text style={styles.addButtonText}>Add to Activities</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
     );
   };
 
@@ -331,13 +537,63 @@ const MyTripScreen = ({ navigation }) => {
                 value={activity} 
                 onChangeText={setActivity} 
               />
-              <TextInput 
-                placeholder="Time" 
-                style={styles.input} 
-                value={time} 
-                onChangeText={setTime} 
-              />
-              <TouchableOpacity style={styles.button} onPress={handleAddActivity}>
+              
+              <TouchableOpacity 
+                style={styles.timeInput}
+                onPress={() => setShowTimePicker(true)}
+              >
+                <Text style={time ? styles.timeText : styles.timePlaceholder}>
+                  {time || "Select Time"}
+                </Text>
+                <Ionicons name="time-outline" size={24} color="#6C84F5" />
+              </TouchableOpacity>
+              
+              {showTimePicker && (
+                <DateTimePicker
+                  value={date}
+                  mode="time"
+                  is24Hour={false}
+                  display="default"
+                  onChange={(event, selectedDate) => {
+                    setShowTimePicker(false);
+                    if (selectedDate) {
+                      setDate(selectedDate);
+                      const hours = selectedDate.getHours();
+                      const minutes = selectedDate.getMinutes();
+                      const ampm = hours >= 12 ? 'PM' : 'AM';
+                      const formattedHours = hours % 12 || 12;
+                      const formattedMinutes = minutes < 10 ? `0${minutes}` : minutes;
+                      setTime(`${formattedHours}:${formattedMinutes} ${ampm}`);
+                    }
+                  }}
+                />
+              )}
+              
+              <TouchableOpacity 
+                style={[
+                  styles.button,
+                  !(activity && time) && styles.disabledButton
+                ]} 
+                disabled={!(activity && time)}
+                onPress={() => {
+                  // Ensure the current user is logged in
+                  const currentUser = auth.currentUser;
+                  if (!currentUser) {
+                    Alert.alert('Error', 'You must be logged in to add activities');
+                    return;
+                  }
+                  
+                  addActivity({ 
+                    id: Date.now().toString(), 
+                    title: activity, 
+                    time,
+                    userId: currentUser.uid // Add this line to associate with current user
+                  });
+                  setActivity('');
+                  setTime('');
+                  Alert.alert('Success', 'Activity added successfully');
+                }}
+              >
                 <Text style={styles.buttonText}>Add Activity</Text>
               </TouchableOpacity>
             </View>
@@ -421,17 +677,165 @@ const MyTripScreen = ({ navigation }) => {
         
       case 'activity-suggestions':
         return (
-          <View style={styles.tabContent}>
+          <View style={styles.tabContentWithScrollable}>
             <Text style={styles.title}>Activity Suggestions</Text>
-            <Text style={styles.comingSoonText}>Coming soon!</Text>
+            <Text style={styles.subtitle}>Find fun things to do nearby</Text>
+            
+            <TouchableOpacity style={styles.button} onPress={async () => {
+              setLoading(true);
+              setError(null);
+              try {
+                const coords = await getCurrentLocation();
+                const activityTypes = ['park', 'museum', 'landmark', 'theater', 'mall', 'entertainment'];
+                const promiseArray = activityTypes.map(type => 
+                  fetchPOIsFromMapbox(coords.latitude, coords.longitude, type)
+                );
+                
+                const resultsArray = await Promise.all(promiseArray);
+                
+                const uniquePlaces = new Map();
+                resultsArray.flat().forEach(item => {
+                  if (item && item.place_name && !uniquePlaces.has(item.place_name)) {
+                    uniquePlaces.set(item.place_name, item);
+                  }
+                });
+                
+                const combinedResults = Array.from(uniquePlaces.values()).slice(0, 15);
+                setSuggestions(combinedResults);
+              } catch (err) {
+                setError(err.message);
+                setSuggestions([]);
+              } finally {
+                setLoading(false);
+              }
+            }}>
+              <Text style={styles.buttonText}>Get Activity Suggestions</Text>
+            </TouchableOpacity>
+            
+            {loading && <Text style={styles.loadingText}>Loading suggestions...</Text>}
+            {error && <Text style={styles.error}>{error}</Text>}
+            
+            {!loading && !error && suggestions.length === 0 && (
+              <Text style={styles.emptyText}>
+                No suggestions available yet. Press the button to get suggestions.
+              </Text>
+            )}
+            
+            {!loading && !error && suggestions.length > 0 && (
+              <View style={styles.suggestionsWrapper}>
+                <Text style={styles.tipText}>Tip: Tap the "+" icon to add as an activity</Text>
+                <ScrollView 
+                  style={styles.suggestionsInnerScroll}
+                  nestedScrollEnabled={true}
+                  contentContainerStyle={styles.suggestionsContentContainer}
+                >
+                  {suggestions.map(item => (
+                    <View key={item.id} style={styles.card}>
+                      <View style={styles.cardHeader}>
+                        <Text style={styles.place}>{item.text}</Text>
+                        <TouchableOpacity 
+                          style={styles.addToActivityButton}
+                          onPress={() => {
+                            setTempActivity(item);
+                            setShowTimeModal(true);
+                          }}
+                        >
+                          <Ionicons name="add-circle-outline" size={24} color="#6C84F5" />
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={styles.details}>{item.place_name}</Text>
+                      <TouchableOpacity 
+                        style={styles.directionsButton}
+                        onPress={() => {
+                          const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(item.place_name)}`;
+                          Linking.openURL(url);
+                        }}
+                      >
+                        <Text style={styles.directionsText}>Get Directions</Text>
+                        <Ionicons name="navigate-outline" size={16} color="#6C84F5" />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
           </View>
         );
         
       case 'food-suggestions':
         return (
-          <View style={styles.tabContent}>
+          <View style={styles.tabContentWithScrollable}>
             <Text style={styles.title}>Food Suggestions</Text>
-            <Text style={styles.comingSoonText}>Coming soon!</Text>
+            <Text style={styles.subtitle}>Discover restaurants and cafes nearby</Text>
+            
+            <TouchableOpacity style={styles.button} onPress={async () => {
+              setLoadingFood(true);
+              setFoodError(null);
+              try{
+                const coords = await getCurrentLocation();
+                const foodTypes = ['restaurant', 'cafe', 'bakery', 'bar', 'food'];
+                const promiseArray = foodTypes.map(type => 
+                  fetchPOIsFromMapbox(coords.latitude, coords.longitude, type)
+                );
+                
+                const resultsArray = await Promise.all(promiseArray);
+                
+                const uniquePlaces = new Map();
+                resultsArray.flat().forEach(item => {
+                  if (item && item.place_name && !uniquePlaces.has(item.place_name)) {
+                    uniquePlaces.set(item.place_name, item);
+                  }
+                });
+                
+                const combinedResults = Array.from(uniquePlaces.values()).slice(0, 15);
+                setFoodSuggestions(combinedResults);
+              } catch (err) {
+                setFoodError(err.message);
+                setFoodSuggestions([]);
+              } finally {
+                setLoadingFood(false);
+              }
+            }}>
+              <Text style={styles.buttonText}>Get Food Suggestions</Text>
+            </TouchableOpacity>
+            
+            {loadingFood && <Text style={styles.loadingText}>Loading food suggestions...</Text>}
+            {foodError && <Text style={styles.error}>{foodError}</Text>}
+            
+            {!loadingFood && !foodError && foodSuggestions.length === 0 && (
+              <Text style={styles.emptyText}>
+                No food suggestions available yet. Press the button to get restaurants nearby.
+              </Text>
+            )}
+            
+            {!loadingFood && !foodError && foodSuggestions.length > 0 && (
+              <View style={styles.suggestionsWrapper}>
+                <ScrollView 
+                  style={styles.suggestionsInnerScroll}
+                  nestedScrollEnabled={true}
+                  contentContainerStyle={styles.suggestionsContentContainer}
+                >
+                  {foodSuggestions.map(item => (
+                    <View key={item.id} style={styles.card}>
+                      <View style={styles.cardHeader}>
+                        <Text style={styles.place}>{item.text}</Text>
+                      </View>
+                      <Text style={styles.details}>{item.place_name}</Text>
+                      <TouchableOpacity 
+                        style={styles.directionsButton}
+                        onPress={() => {
+                          const url = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(item.place_name)}`;
+                          Linking.openURL(url);
+                        }}
+                      >
+                        <Text style={styles.directionsText}>Get Directions</Text>
+                        <Ionicons name="navigate-outline" size={16} color="#6C84F5" />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
           </View>
         );
         
@@ -447,46 +851,69 @@ const MyTripScreen = ({ navigation }) => {
         <Text style={styles.headerTitle}>My Trip</Text>
       </View>
       
-      <ScrollView style={styles.scrollContainer}>
+      <ScrollView 
+        style={styles.scrollContainer}
+        contentContainerStyle={styles.scrollContentContainer}
+        scrollEnabled={true}
+        showsVerticalScrollIndicator={true}
+      >
         {/* Category Tabs */}
         <View style={styles.categoriesContainer}>
           <TouchableOpacity 
-            style={styles.categoryButton}
+            style={[
+              styles.categoryButton, 
+              activeTab === 'travel' && styles.categoryButtonActive
+            ]}
             onPress={() => setActiveTab('travel')}
           >
             <Text style={styles.categoryText}>Travel Documents</Text>
           </TouchableOpacity>
           
           <TouchableOpacity 
-            style={styles.categoryButton}
+            style={[
+              styles.categoryButton, 
+              activeTab === 'hotel' && styles.categoryButtonActive
+            ]}
             onPress={() => setActiveTab('hotel')}
           >
             <Text style={styles.categoryText}>Hotel Booking</Text>
           </TouchableOpacity>
           
           <TouchableOpacity 
-            style={styles.categoryButton}
+            style={[
+              styles.categoryButton, 
+              activeTab === 'tour' && styles.categoryButtonActive
+            ]}
             onPress={() => setActiveTab('tour')}
           >
             <Text style={styles.categoryText}>Bus Tour Tickets{'\n'}+ Dinner Reservations</Text>
           </TouchableOpacity>
           
           <TouchableOpacity 
-            style={styles.categoryButton}
+            style={[
+              styles.categoryButton, 
+              activeTab === 'activity-suggestions' && styles.categoryButtonActive
+            ]}
             onPress={() => setActiveTab('activity-suggestions')}
           >
             <Text style={styles.categoryText}>Activity Suggestions</Text>
           </TouchableOpacity>
           
           <TouchableOpacity 
-            style={styles.categoryButton}
+            style={[
+              styles.categoryButton, 
+              activeTab === 'food-suggestions' && styles.categoryButtonActive
+            ]}
             onPress={() => setActiveTab('food-suggestions')}
           >
             <Text style={styles.categoryText}>Food Suggestions</Text>
           </TouchableOpacity>
           
           <TouchableOpacity 
-            style={styles.categoryButton}
+            style={[
+              styles.categoryButton, 
+              activeTab === 'activity' && styles.categoryButtonActive
+            ]}
             onPress={() => setActiveTab('activity')}
           >
             <Text style={styles.categoryText}>Add Activity</Text>
@@ -495,6 +922,11 @@ const MyTripScreen = ({ navigation }) => {
         
         {/* Tab Content */}
         {renderContent()}
+        
+        {/* Debug marker */}
+        <View style={styles.debugMarker}>
+          <Text>You've scrolled to the bottom!</Text>
+        </View>
       </ScrollView>
       
       {/* Help text */}
@@ -504,6 +936,9 @@ const MyTripScreen = ({ navigation }) => {
       
       {/* Add Document Modal */}
       {renderAddDocumentModal()}
+      
+      {/* Time Entry Modal */}
+      {renderTimeEntryModal()}
     </SafeAreaView>
   );
 };
@@ -515,6 +950,9 @@ const styles = StyleSheet.create({
   },
   scrollContainer: {
     flex: 1,
+  },
+  scrollContentContainer: {
+    paddingBottom: 50,
   },
   header: {
     backgroundColor: '#6C84F5',
@@ -541,6 +979,11 @@ const styles = StyleSheet.create({
     elevation: 2,
     alignItems: 'center',
   },
+  categoryButtonActive: {
+    backgroundColor: '#E6EBFF',
+    borderColor: '#6C84F5',
+    borderWidth: 1,
+  },
   categoryText: {
     fontSize: 16,
     fontWeight: '500',
@@ -558,9 +1001,27 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     elevation: 2,
   },
+  tabContentWithScrollable: {
+    padding: 20,
+    backgroundColor: '#FFF',
+    margin: 15,
+    marginTop: 0,
+    borderRadius: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+    height: height * 0.6,
+  },
   title: {
     fontSize: 18,
     fontWeight: 'bold',
+    marginBottom: 5,
+  },
+  subtitle: {
+    fontSize: 14,
+    color: '#666',
     marginBottom: 15,
   },
   input: {
@@ -570,39 +1031,44 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     borderRadius: 5,
   },
+  timeInput: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: '#ccc',
+    padding: 10,
+    marginBottom: 10,
+    borderRadius: 5,
+    height: 44,
+  },
+  timeText: {
+    color: '#000',
+    fontSize: 16,
+  },
+  timePlaceholder: {
+    color: '#999',
+    fontSize: 16,
+  },
   button: {
     backgroundColor: '#6C84F5',
     padding: 10,
     borderRadius: 5,
+    marginBottom: 15,
   },
   buttonText: {
     color: 'white',
     textAlign: 'center',
-  },
-  activityContainer: {
-    marginBottom: 20,
-  },
-  emptyText: {
-    textAlign: 'center',
-    color: '#888',
-    marginVertical: 20,
-  },
-  addDocumentButton: {
-    backgroundColor: '#6C84F5',
-    padding: 12,
-    borderRadius: 5,
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  addDocumentText: {
-    color: '#FFF',
     fontWeight: 'bold',
+  },
+  disabledButton: {
+    backgroundColor: '#cccccc',
   },
   documentItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
     backgroundColor: '#f9f9f9',
+    padding: 12,
     borderRadius: 8,
     marginBottom: 10,
   },
@@ -647,12 +1113,37 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
   },
+  modalSubtitle: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 15,
+  },
   modalInput: {
     borderWidth: 1,
     borderColor: '#ccc',
     padding: 10,
     marginBottom: 15,
     borderRadius: 5,
+  },
+  toggleContainer: {
+    flexDirection: 'row',
+    marginBottom: 15,
+  },
+  toggleButton: {
+    flex: 1,
+    padding: 10,
+    alignItems: 'center',
+    backgroundColor: '#f0f0f0',
+  },
+  toggleButtonActive: {
+    backgroundColor: '#6C84F5',
+  },
+  toggleText: {
+    color: '#555',
+  },
+  toggleTextActive: {
+    color: '#FFF',
+    fontWeight: 'bold',
   },
   filePicker: {
     borderWidth: 1,
@@ -677,31 +1168,75 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontWeight: 'bold',
   },
-  toggleContainer: {
-    flexDirection: 'row',
-    marginBottom: 15,
-  },
-  toggleButton: {
+  suggestionsWrapper: {
+    marginTop: 10,
     flex: 1,
-    padding: 10,
+  },
+  suggestionsInnerScroll: {
+    flex: 1,
+  },
+  suggestionsContentContainer: {
+    paddingBottom: 20,
+  },
+  card: {
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 8,
+    marginBottom: 10,
+    backgroundColor: 'white',
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#f0f0f0',
   },
-  toggleButtonActive: {
-    backgroundColor: '#6C84F5',
-  },
-  toggleText: {
-    color: '#555',
-  },
-  toggleTextActive: {
-    color: '#FFF',
+  place: {
     fontWeight: 'bold',
+    fontSize: 16,
+    flex: 1,
   },
-  comingSoonText: {
+  details: {
+    color: '#666',
+    marginTop: 4,
+  },
+  error: {
+    color: 'red',
+    marginBottom: 10,
+  },
+  loadingText: {
+    textAlign: 'center',
+    marginVertical: 10,
+  },
+  addToActivityButton: {
+    padding: 5,
+  },
+  directionsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+  },
+  directionsText: {
+    color: '#6C84F5',
+    marginRight: 5,
+    fontSize: 13,
+  },
+  emptyText: {
     textAlign: 'center',
     color: '#888',
-    fontStyle: 'italic',
-    marginTop: 20,
+    marginVertical: 20,
+  },
+  debugMarker: {
+    padding: 10,
+    backgroundColor: '#ffff99',
+    marginHorizontal: 15,
+    marginTop: 10,
+    marginBottom: 20,
+    borderRadius: 5,
+    alignItems: 'center',
   },
   helpTextContainer: {
     backgroundColor: 'rgba(0,0,0,0.7)',
@@ -714,6 +1249,37 @@ const styles = StyleSheet.create({
   helpText: {
     color: '#fff',
     fontSize: 12,
+  },
+  addDocumentButton: {
+    backgroundColor: '#E6EBFF',
+    padding: 12,
+    borderRadius: 5,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  addDocumentText: {
+    color: '#6C84F5',
+    fontWeight: '500',
+  },
+  timePickerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: '#ccc',
+    padding: 10,
+    marginBottom: 20,
+    borderRadius: 5,
+    height: 44,
+  },
+  tipText: {
+    fontSize: 12,
+    color: '#888',
+    fontStyle: 'italic',
+    marginBottom: 8,
+  },
+  activityContainer: {
+    marginBottom: 10,
   },
 });
 
